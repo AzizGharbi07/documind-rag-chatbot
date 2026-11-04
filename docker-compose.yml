@@ -1,0 +1,79 @@
+# DocuMind local stack. Quick start: copy .env.example to .env, then `docker compose up --build`.
+# Ollama runs on the host by default (faster on Windows than inside Docker); see docs/decisions/0001.
+name: documind
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-documind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-documind}
+      POSTGRES_DB: ${POSTGRES_DB:-documind}
+    volumes:
+      # Postgres 18 images keep data in a versioned subfolder of /var/lib/postgresql.
+      - pgdata:/var/lib/postgresql
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    volumes:
+      - qdrant:/qdrant/storage
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+    healthcheck:
+      # The image has no curl/wget; bash can open a TCP socket directly.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Container-network addresses override the localhost values used for local dev in .env.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-documind}:${POSTGRES_PASSWORD:-documind}@postgres:5432/${POSTGRES_DB:-documind}
+      QDRANT_URL: http://qdrant:6333
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      CORS_ORIGINS: '["http://localhost:${WEB_PORT:-3000}"]'
+    extra_hosts:
+      # Docker Desktop provides host.docker.internal; this line makes it work on Linux/CI too.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${WEB_PORT:-3000}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Optional: Ollama inside Docker (`docker compose --profile ollama up`), for machines without
+  # a host install. Set DOCKER_OLLAMA_BASE_URL=http://ollama:11434 in .env when using it.
+  ollama:
+    image: ollama/ollama:0.40.9
+    profiles: ["ollama"]
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+
+volumes:
+  pgdata:
+  qdrant:
+  ollama:
